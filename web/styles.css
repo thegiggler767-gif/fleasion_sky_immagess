@@ -198,3 +198,13 @@ h3.cat { margin: 12px 2px 0; font-size: 14px; text-transform: uppercase; letter-
 .w-list { text-align: left; padding-left: 4px; list-style: none; display: flex; flex-direction: column; gap: 8px; margin: 10px 0; }
 .danger-text { color: var(--bad); }
 .tweak-bar .icon-btn { width: 42px; height: 42px; }
+
+/* ---------- v3 ---------- */
+.no-model { flex-direction: column; gap: 14px; pointer-events: auto !important; display: flex !important; align-items: center; justify-content: center; background: rgba(15,19,32,.55); }
+.build-check { display: flex; gap: 10px; align-items: flex-start; font-size: 14px; }
+.build-check.ok { border-color: rgba(62,207,142,.4); background: linear-gradient(135deg, rgba(62,207,142,.12), rgba(62,207,142,.03)); }
+.build-check.warn { border-color: rgba(255,159,67,.45); background: linear-gradient(135deg, rgba(255,159,67,.14), rgba(255,159,67,.03)); }
+.build-check ul { margin: 6px 0 0; padding-left: 18px; color: #dfe5f3; font-size: 13px; }
+.linkish { background: none; border: 0; color: var(--accent2); padding: 4px 0; font-size: 13px; display: block; }
+.pill.good { background: rgba(62,207,142,.15); color: var(--good); margin-left: 4px; }
+.pill.warn { background: rgba(255,159,67,.15); color: var(--accent); margin-left: 4px; }

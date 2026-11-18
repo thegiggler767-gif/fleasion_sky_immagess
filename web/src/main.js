@@ -1,5 +1,5 @@
 import { Viewer } from './viewer.js';
-import { generate, tweak, refineModel, ask, listFreeModels, testKey, usageToday, FREE_ROUTER } from './ai.js';
+import { generate, tweak, refineModel, fixBuild, ask, listFreeModels, testKey, usageToday, copiesOf, FREE_ROUTER } from './ai.js';
 import { share, copy, openUrl, toast, saveFile, shareFile, vibrate, isAndroid, listen, keepAwake, readClipboard } from './bridge.js';
 import { SAMPLE } from './sample.js';
 import { icon, logoSvg } from './icons.js';
@@ -125,6 +125,9 @@ function renderHome() {
         <textarea id="details" rows="2" placeholder="e.g. 1.8 m long, use pallets, I already own a drill"></textarea>
         <label>Budget (${esc(settings.currency)})</label>
         <input id="budget" type="number" inputmode="decimal" placeholder="optional">
+        <label>Parts I already have</label>
+        <textarea id="have" rows="2" placeholder="e.g. ESP32 DevKit, BME280 sensor, 2 m of 90×45 pine, box of 8g × 30 mm screws">${esc(localStorage.getItem('bc3d_have') || '')}</textarea>
+        <label class="toggle" style="margin-top:6px"><input type="checkbox" id="onlyHave"><span>Only use the parts I have</span></label>
       </details>
       <button class="btn primary big" id="btnGo">${icon('spark')} Generate</button>
       ${hasKey ? `<div class="muted small center">${usageToday()} of ~50 free AI requests used today</div>` : ''}
@@ -245,7 +248,7 @@ function buildCard(b) {
     <div class="build-icon ${b.data.type}">${b.data.type === 'item' ? '🛒' : '🔨'}</div>
     <div class="build-body">
       <div class="build-title">${esc(b.data.title)}</div>
-      <div class="muted small">${t.count} items · ${money(t.total)} · ${b.data.model.parts.length} parts${b.data.type === 'project' && b.data.steps.length ? ` · built ${sd}/${b.data.steps.length}` : ''}</div>
+      <div class="muted small">${t.count} items · ${money(t.total)} · ${pieceCount(b.data)} 3D pieces${b.data.type === 'project' && b.data.steps.length ? ` · built ${sd}/${b.data.steps.length}` : ''}</div>
       <div class="bar"><i style="width:${pct}%"></i></div>
     </div>
     <button class="icon-btn subtle" data-del="${b.id}" aria-label="Delete">${icon('trash')}</button>
@@ -304,12 +307,15 @@ async function startGenerate() {
   if (!prompt && !homeImage) { toast('Type, say or snap something first'); $('#prompt').focus(); return; }
   if (!settings.apiKey.trim()) { toast('Add your OpenRouter key first'); go('settings'); return; }
   const details = $('#details')?.value.trim(), budget = $('#budget')?.value.trim();
+  const have = $('#have')?.value.trim(), onlyHave = $('#onlyHave')?.checked;
+  localStorage.setItem('bc3d_have', have || '');
   const image = homeImage;
-  const data = await withLoading(signal => generate(settings, { prompt, mode: homeMode, details, budget, image }, setLoadingStatus, signal));
+  const data = await withLoading(signal => generate(settings, { prompt, mode: homeMode, details, budget, image, have, onlyHave }, setLoadingStatus, signal));
   if (!data) return;
   sessionStorage.removeItem('bc3d_draft');
   homeImage = null;
   const b = ensureBuild({ id: 'b' + Date.now().toString(36), created: Date.now(), prompt: prompt || '📷 photo', data });
+  data.shopping_list.forEach(i => { if (i.have) b.checked[i.id] = true; });
   builds.unshift(b); saveBuilds();
   openBuild(b);
 }
@@ -455,6 +461,7 @@ function render3D() {
     viewer = new Viewer(document.createElement('div'), { onSelect: showPart, onMeasure: d2 => { const h = $('#mHint'); if (h) h.textContent = d2 == null ? '📏 Tap a second point' : `📏 ${fmtLen(d2)} — tap again to re-measure`; } });
   }
   viewer.formatLen = fmtLen;
+  if (settings.outlines === false) viewer.outlines = false;
   $('#stage').prepend(viewer.container);
   viewer.container.className = 'canvas-wrap';
   viewer.start();
@@ -463,7 +470,10 @@ function render3D() {
   } else { viewer.resize(); viewer.select(-1); }
   viewer.setMeasuring(false);
   viewer.setExplode(0);
-  if (!d.model.parts.length) $('#stage').insertAdjacentHTML('beforeend', `<div class="hud center muted">No 3D parts — try Info → Improve 3D model.</div>`);
+  if (!d.model.parts.length || d.modelError) {
+    $('#stage').insertAdjacentHTML('beforeend', `<div class="hud center no-model"><div>${d.model.parts.length ? '⚠️ The detailed 3D pass didn\'t finish, so this is the older model.' : '🧊 Your parts list is ready, but the 3D model didn\'t finish.'}<br><span class="muted small">${esc(d.modelError || '')}</span></div><button class="btn primary" id="build3d">${icon('cube')} Build the 3D model</button></div>`);
+    $('#build3d').onclick = doRefine;
+  }
   $('#dims').textContent = viewer.dimensionsText(settings.units);
   $('#tRotate').classList.toggle('on', viewer.controls.autoRotate);
   $('#tXray').classList.toggle('on', viewer.blueprint);
@@ -472,8 +482,10 @@ function render3D() {
   $('#tViews').onclick = () => {
     openSheet(`<h3>Camera view</h3><div class="view-grid">
       ${[['iso', '🧊', '3D'], ['front', '⬜', 'Front'], ['right', '▶️', 'Side'], ['top', '⬇️', 'Top'], ['back', '🔙', 'Back'], ['left', '◀️', 'Other side']].map(([k, e, l]) => `<button class="btn ghost" data-view="${k}">${e} ${l}</button>`).join('')}
-      </div>`);
+      </div>
+      <label class="toggle" style="margin-top:14px"><input type="checkbox" id="vOutlines" ${viewer.outlines ? 'checked' : ''}><span>Show outlines on edges</span></label>`);
     $$('[data-view]').forEach(b => b.onclick = () => { closeSheet(); viewer.setView(b.dataset.view); $('#tRotate').classList.remove('on'); });
+    $('#vOutlines').onchange = e => { viewer.setOutlines(e.target.checked); settings.outlines = e.target.checked; saveSettings(); };
   };
   $('#tParts').onclick = openPartsDrawer;
   $('#tMeasure').onclick = e => {
@@ -572,12 +584,12 @@ function openPartsDrawer() {
   const d = current.data;
   const groups = {};
   d.model.parts.forEach((p, i) => (groups[shortName(p.name)] ||= []).push(i));
-  openSheet(`<h3>Parts <span class="muted small">${d.model.parts.length}</span></h3>
+  openSheet(`<h3>Parts <span class="muted small">${pieceCount(d)} pieces</span></h3>
     <div class="parts-list">${Object.values(groups).map(idx => {
       const p = d.model.parts[idx[0]];
       return `<button class="part-row" data-pi="${idx[0]}" data-all="${idx.join(',')}">
         <span class="dot" style="background:${p.color}"></span>
-        <span class="grow">${esc(p.name)}${idx.length > 1 ? ` <span class="muted">× ${idx.length}</span>` : ''}</span>
+        <span class="grow">${esc(p.name)}${(() => { const c = idx.reduce((n, j) => n + copiesOf(d.model.parts[j]), 0); return c > 1 ? ` <span class="muted">× ${c}</span>` : ''; })()}</span>
         <span class="muted small">${fmtSize(p.size)}</span></button>`;
     }).join('')}</div>`);
   $$('[data-pi]').forEach(b => b.onclick = () => {
@@ -612,6 +624,7 @@ function renderList() {
       <div class="bar wide"><i style="width:${pct}%"></i></div>
       ${catTotals.length > 1 ? `<div class="breakdown wide">${catTotals.map(([c, v]) => `<div class="bd-row"><span>${esc(c)}</span><div class="bd-bar"><i style="width:${Math.max(3, v / maxCat * 100)}%"></i></div><span class="bd-v">${money(v)}</span></div>`).join('')}</div>` : ''}
     </div>
+    ${checkCard(d)}
     <div class="row gap wrap">
       <button class="btn small" id="shareList">${icon('share')} Share</button>
       <button class="btn small ghost" id="copyList">${icon('copy')}</button>
@@ -627,7 +640,7 @@ function renderList() {
       <div class="card item ${current.checked[i.id] ? 'done' : ''}">
         <label class="check"><input type="checkbox" ${current.checked[i.id] ? 'checked' : ''} data-chk="${esc(i.id)}"><span></span></label>
         <div class="item-body" data-item="${esc(i.id)}">
-          <div class="item-name">${esc(i.name)} ${i.optional ? '<span class="pill">optional</span>' : ''}</div>
+          <div class="item-name">${esc(i.name)} ${i.optional ? '<span class="pill">optional</span>' : ''}${i.have ? '<span class="pill good">you have</span>' : ''}${i.addedBy3D ? '<span class="pill warn">added by 3D check</span>' : ''}</div>
           <div class="muted small">${fmtQty(i)}${i.notes ? ' · ' + esc(i.notes) : ''}</div>
         </div>
         <div class="price">${money(i.price)}</div>
@@ -651,10 +664,79 @@ function renderList() {
   });
   $$('[data-item]').forEach(el => el.onclick = () => itemSheet(el.dataset.item));
   $('#addItem').onclick = () => itemSheet(null);
+  $('#fixBuild')?.addEventListener('click', async () => {
+    if (!settings.apiKey.trim()) { toast('Add your OpenRouter key first'); go('settings'); return; }
+    const probs = buildCheck(d).problems.map(x => x.text);
+    const data = await withLoading(signal => fixBuild(settings, slimData(), probs, setLoadingStatus, signal));
+    if (data) { applyNewData(data, 'Before fixing the parts list'); tab = 'list'; renderResult(); toast('Parts list fixed ✓'); }
+  });
+  $('#checkMore')?.addEventListener('click', e => { $('#checkList').classList.toggle('hidden'); e.currentTarget.remove(); });
   $('#hideGot').onclick = () => { settings.hideGot = !settings.hideGot; saveSettings(); renderList(); };
   $('#shareList').onclick = () => share(listText());
   $('#copyList').onclick = () => { copy(listText()); toast('List copied'); };
   $('#storeSel').onchange = e => { settings.store = e.target.value; saveSettings(); };
+}
+
+function pieceCount(d) { return d.model.parts.reduce((n, p) => n + copiesOf(p), 0); }
+
+// Does the shopping list exactly cover what's in the 3D model?
+function buildCheck(d) {
+  const problems = [];
+  const parts = d.model.parts;
+  if (!parts.length) return { problems, ok: [], noModel: true };
+  const byItem = new Map();
+  const orphan = new Map();
+  for (const p of parts) {
+    const c = copiesOf(p);
+    if (p.item) { const a = byItem.get(p.item) || []; a.push(p); byItem.set(p.item, a); }
+    else if (Math.max(...p.size) > 0.01) orphan.set(shortName(p.name), (orphan.get(shortName(p.name)) || 0) + c);
+  }
+  if (orphan.size) {
+    const names = [...orphan.entries()].slice(0, 6).map(([n, c]) => `${c > 1 ? c + ' × ' : ''}${n}`);
+    problems.push({ text: `These parts in the 3D model aren't on the shopping list: ${names.join(', ')}`, short: `${orphan.size} part type${orphan.size > 1 ? 's' : ''} in 3D not on the list` });
+  }
+  for (const it of d.shopping_list) {
+    if (it.optional) continue;
+    if (!(it.qty > 0)) { problems.push({ text: `${it.name} has a quantity of 0`, short: `${it.name}: quantity 0` }); continue; }
+    const ps = byItem.get(it.id);
+    if (!ps) continue;
+    const unit = (it.unit || '').toLowerCase().trim();
+    const n = ps.reduce((s, p) => s + copiesOf(p), 0);
+    const len = stockLength(it);
+    const lengthy = /length|board|sheet|^m$|metre|meter|roll|^lm$/.test(unit) || /timber|lumber|wood/i.test(it.category);
+    if (len && lengthy) {
+      // total cut length needed vs stock bought
+      const need = ps.reduce((s, p) => s + Math.max(...p.size) * copiesOf(p), 0);
+      const have = /^(m|metres?|meters?|lm|linear m)$/.test(unit) ? it.qty : it.qty * len;
+      if (need > have * 1.02) {
+        problems.push({ text: `${it.name}: the 3D model needs about ${need.toFixed(2)} m of cuts but the list only buys ${have.toFixed(2)} m`, short: `${shortItem(it.name)}: need ${need.toFixed(1)} m, buying ${have.toFixed(1)} m` });
+      }
+    } else if (/^(pcs?|pieces?|each|ea|x|units?|qty|)$/.test(unit) && n > it.qty + 0.01 && !/screw|nail|bolt|nut|washer|pin|rivet|staple/i.test(it.name)) {
+      problems.push({ text: `The 3D model uses ${n} × ${it.name} but the list only has ${it.qty}`, short: `${shortItem(it.name)}: 3D uses ${n}, list has ${it.qty}` });
+    }
+  }
+  const linked = parts.filter(p => p.item).reduce((s, p) => s + copiesOf(p), 0);
+  return { problems, linked, total: pieceCount(d) };
+}
+const shortItem = n => n.length > 34 ? n.slice(0, 32) + '…' : n;
+function stockLength(it) {
+  if (Array.isArray(it.dims) && it.dims[0] > 200) return it.dims[0] / 1000;
+  let best = 0;
+  for (const m of it.name.matchAll(/(\d+(?:\.\d+)?)\s*(mm|m)\b/gi)) {
+    const v = parseFloat(m[1]) * (m[2].toLowerCase() === 'mm' ? 0.001 : 1);
+    if (v >= 0.2 && v <= 12) best = Math.max(best, v);
+  }
+  return best;
+}
+
+function checkCard(d) {
+  const c = buildCheck(d);
+  if (c.noModel) return '';
+  if (!c.problems.length) return `<div class="card build-check ok">✅ <div><b>Buildable with exactly this list</b><div class="muted small">${c.linked} of ${c.total} 3D pieces come straight from these items, and the quantities cover them.</div></div></div>`;
+  return `<div class="card build-check warn">⚠️ <div class="grow"><b>${c.problems.length} thing${c.problems.length > 1 ? 's' : ''} to fix before you shop</b>
+    <ul id="checkList" class="${c.problems.length > 2 ? 'hidden' : ''}">${c.problems.map(p => `<li>${esc(p.short)}</li>`).join('')}</ul>
+    ${c.problems.length > 2 ? `<button class="linkish" id="checkMore">Show details</button>` : ''}
+    <button class="btn small primary" id="fixBuild" style="margin-top:8px">${icon('spark')} Fix the list with AI</button></div></div>`;
 }
 
 function cutList(d) {
@@ -667,11 +749,12 @@ function cutList(d) {
     const s = p.size.map(v => Math.round(v * 1000)).sort((a, b) => b - a);
     if (s[0] < 30) continue;
     const key = s.join('×');
+    const c = copiesOf(p);
     const r = map.get(key) || { n: 0, l: s[0], w: s[1], t: s[2], names: new Set() };
-    r.n++; r.names.add(p.name.replace(/\s*\d+$/, ''));
+    r.n += c; r.names.add(p.name.replace(/\s*\d+$/, ''));
     map.set(key, r);
-    if (s[1] <= 300) { const k = `${s[1]} × ${s[2]} mm`; stock.set(k, (stock.get(k) || 0) + s[0]); }
-    else { const k = `sheet ${s[2]} mm`; stock.set(k, (stock.get(k) || 0) + s[0] * s[1]); }
+    if (s[1] <= 300) { const k = `${s[1]} × ${s[2]} mm`; stock.set(k, (stock.get(k) || 0) + s[0] * c); }
+    else { const k = `sheet ${s[2]} mm`; stock.set(k, (stock.get(k) || 0) + s[0] * s[1] * c); }
   }
   const rows = [...map.values()].sort((a, b) => b.l - a.l).map(r => ({
     n: r.n, dims: settings.units === 'imperial' ? [r.l, r.w, r.t].map(v => (v / 25.4).toFixed(1) + '″').join(' × ') : `${r.l} × ${r.w} × ${r.t}`, names: [...r.names].slice(0, 2).join(', '),
@@ -857,7 +940,7 @@ function renderInfo() {
         ${d.dimensions ? `<div><span class="muted small">Size</span><b>${esc(d.dimensions)}</b></div>` : ''}
         <div><span class="muted small">Cost</span><b>${money(t.total)}</b></div>
         <div><span class="muted small">Items</span><b>${t.count}</b></div>
-        <div><span class="muted small">3D parts</span><b>${d.model.parts.length}</b></div>
+        <div><span class="muted small">3D pieces</span><b>${pieceCount(d)}</b></div>
       </div>
     </div>
     <div class="card form"><label>My notes</label><textarea id="iNotes" rows="3" placeholder="Measurements, where to buy, ideas…">${esc(current.notes)}</textarea></div>
@@ -916,7 +999,7 @@ async function regenerate() {
 async function doRefine() {
   if (!settings.apiKey.trim()) { toast('Add your OpenRouter key first'); go('settings'); return; }
   const data = await withLoading(signal => refineModel(settings, slimData(), setLoadingStatus, signal));
-  if (data) { applyNewData(data, 'Before improving 3D'); toast(`3D model improved: ${data.model.parts.length} parts`); }
+  if (data) { applyNewData(data, 'Before improving 3D'); toast(`3D model rebuilt: ${pieceCount(data)} pieces`); }
 }
 
 function slimData() {
@@ -933,7 +1016,7 @@ async function doTweak() {
   const data = await withLoading(signal => tweak(settings, slimData(), ins, setLoadingStatus, signal));
   if (!data) return;
   applyNewData(data, `Before “${ins.slice(0, 40)}”`);
-  toast('Updated ✓ — tap Undo if you don’t like it');
+  toast(data.modelError ? 'List updated — the 3D pass failed, tap “Build the 3D model”' : 'Updated ✓ — tap Undo if you don’t like it');
 }
 const r4 = v => Math.round(v * 10000) / 10000;
 

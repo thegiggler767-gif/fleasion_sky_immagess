@@ -1,83 +1,8 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 
-const UNIT = {};
-function unitGeo(shape) {
-  if (UNIT[shape]) return UNIT[shape];
-  let g;
-  switch (shape) {
-    case 'cylinder': g = new THREE.CylinderGeometry(0.5, 0.5, 1, 40); break;
-    case 'cone': g = new THREE.ConeGeometry(0.5, 1, 40); break;
-    case 'sphere': g = new THREE.SphereGeometry(0.5, 40, 24); break;
-    case 'halfsphere': g = new THREE.SphereGeometry(0.5, 40, 16, 0, Math.PI * 2, 0, Math.PI / 2); g.translate(0, -0.25, 0); break;
-    case 'capsule': g = new THREE.CapsuleGeometry(0.5, 1, 8, 24); g.scale(1, 0.5, 1); break;
-    case 'tube': {
-      const pts = [new THREE.Vector2(0.38, -0.5), new THREE.Vector2(0.5, -0.5), new THREE.Vector2(0.5, 0.5), new THREE.Vector2(0.38, 0.5), new THREE.Vector2(0.38, -0.5)];
-      g = new THREE.LatheGeometry(pts, 40); break;
-    }
-    case 'wedge': {
-      const s = new THREE.Shape();
-      s.moveTo(-0.5, -0.5); s.lineTo(0.5, -0.5); s.lineTo(-0.5, 0.5); s.lineTo(-0.5, -0.5);
-      g = new THREE.ExtrudeGeometry(s, { depth: 1, bevelEnabled: false });
-      g.translate(0, 0, -0.5); break;
-    }
-    default: g = new THREE.BoxGeometry(1, 1, 1);
-  }
-  UNIT[shape] = g;
-  return g;
-}
-
-function makeNoiseTexture(kind) {
-  const c = document.createElement('canvas');
-  c.width = c.height = 256;
-  const x = c.getContext('2d');
-  x.fillStyle = '#fff'; x.fillRect(0, 0, 256, 256);
-  if (kind === 'wood') {
-    for (let i = 0; i < 70; i++) {
-      const y = Math.random() * 256, a = 0.04 + Math.random() * 0.1;
-      x.strokeStyle = `rgba(80,50,20,${a})`; x.lineWidth = 0.6 + Math.random() * 2.4;
-      x.beginPath(); x.moveTo(0, y);
-      for (let px = 0; px <= 256; px += 16) x.lineTo(px, y + Math.sin(px / 40 + i) * 3 + Math.random() * 1.5);
-      x.stroke();
-    }
-  } else {
-    const img = x.getImageData(0, 0, 256, 256);
-    for (let i = 0; i < img.data.length; i += 4) {
-      const v = 255 - Math.random() * (kind === 'soil' ? 90 : 45);
-      img.data[i] = img.data[i + 1] = img.data[i + 2] = v;
-    }
-    x.putImageData(img, 0, 0);
-  }
-  const t = new THREE.CanvasTexture(c);
-  t.wrapS = t.wrapT = THREE.RepeatWrapping;
-  t.colorSpace = THREE.SRGBColorSpace;
-  return t;
-}
-const TEX = {};
-const tex = k => (TEX[k] ||= makeNoiseTexture(k));
-
-function makeMaterial(p) {
-  const color = new THREE.Color(p.color);
-  const m = p.material;
-  const o = { color, roughness: 0.5, metalness: 0 };
-  if (m === 'wood') Object.assign(o, { roughness: 0.78, map: tex('wood') });
-  else if (m === 'metal' || m === 'steel') Object.assign(o, { roughness: 0.32, metalness: 0.85 });
-  else if (m === 'aluminium') Object.assign(o, { roughness: 0.28, metalness: 0.9 });
-  else if (m === 'glass') Object.assign(o, { roughness: 0.05, transparent: true, opacity: 0.32, depthWrite: false });
-  else if (m === 'water') Object.assign(o, { roughness: 0.08, transparent: true, opacity: 0.6 });
-  else if (m === 'rubber' || m === 'foam') o.roughness = 0.95;
-  else if (m === 'fabric') o.roughness = 1;
-  else if (m === 'stone' || m === 'concrete') Object.assign(o, { roughness: 0.92, map: tex('stone') });
-  else if (m === 'soil') Object.assign(o, { roughness: 1, map: tex('soil') });
-  else if (m === 'led') Object.assign(o, { emissive: color, emissiveIntensity: 1.6 });
-  else if (m === 'ceramic') o.roughness = 0.18;
-  else if (m === 'leather') o.roughness = 0.65;
-  else if (m === 'plant') o.roughness = 0.8;
-  else if (m === 'paint') o.roughness = 0.42;
-  return new THREE.MeshStandardMaterial(o);
-}
+import { buildGeometry, makeMaterial, instancesOf, clearGeoCache } from './geom.js';
 
 export class Viewer {
   constructor(container, { onSelect, onMeasure } = {}) {
@@ -141,6 +66,8 @@ export class Viewer {
     this.scene.add(this.root);
     this.ghostMat = new THREE.MeshBasicMaterial({ color: 0x7fb2ff, transparent: true, opacity: 0.08, depthWrite: false });
     this.edgeMat = new THREE.LineBasicMaterial({ color: 0x9fd0ff, transparent: true, opacity: 0.9 });
+    this.outlineMat = new THREE.LineBasicMaterial({ color: 0x10131c, transparent: true, opacity: 0.32 });
+    this.outlines = true;
 
     this.ray = new THREE.Raycaster();
     let down = null;
@@ -178,36 +105,41 @@ export class Viewer {
   stop() { this.running = false; }
 
   load(model) {
-    for (const m of this.meshes) { m.material.dispose(); }
+    for (const m of this.materials || []) m.dispose();
     this.root.clear();
+    clearGeoCache();
     this.meshes = [];
+    this.materials = [];
     this.anims = [];
     this.selected = -1;
     this.isolated = -1;
     this.clearMeasure();
     if (this.grid) { this.scene.remove(this.grid); this.grid.geometry.dispose(); }
 
+    let total = 0;
     model.parts.forEach((p, i) => {
-      let geo;
-      if (p.shape === 'roundbox') geo = new RoundedBoxGeometry(p.size[0], p.size[1], p.size[2], 3, Math.min(...p.size) * 0.18);
-      else if (p.shape === 'torus') {
-        const R = Math.max(p.size[0] - p.size[1], 0.002) / 2;
-        geo = new THREE.TorusGeometry(R, p.size[1] / 2, 18, 56);
-        geo.rotateX(Math.PI / 2);
-      } else geo = unitGeo(p.shape);
-      const mesh = new THREE.Mesh(geo, makeMaterial(p));
-      mesh.userData = { index: i, part: p, step: p.step || 1, realMat: mesh.material };
-      if (p.shape === 'roundbox') mesh.scale.set(1, 1, 1);
-      else if (p.shape === 'torus') mesh.scale.set(1, 1, p.size[2] / Math.max(p.size[0], 1e-4));
-      else mesh.scale.set(p.size[0], p.size[1], p.size[2]);
-      mesh.position.set(...p.pos);
-      mesh.rotation.set(...p.rot.map(d => THREE.MathUtils.degToRad(d)), 'XYZ');
-      mesh.castShadow = p.material !== 'glass' && p.material !== 'water';
-      mesh.receiveShadow = true;
-      mesh.userData.base = mesh.position.clone();
-      this.root.add(mesh);
-      this.meshes.push(mesh);
+      if (total > 1500) return;
+      let built;
+      try { built = buildGeometry(p); } catch (e) { console.warn('part failed', p.name, e); return; }
+      const mat = makeMaterial(p);
+      this.materials.push(mat);
+      for (const inst of instancesOf(p)) {
+        if (++total > 1500) break;
+        const mesh = new THREE.Mesh(built.geo, mat);
+        mesh.userData = { index: i, part: p, step: p.step || 1, realMat: mat, edgeGeo: built.edges };
+        mesh.position.copy(inst.pos);
+        mesh.rotation.copy(inst.rot);
+        const small = Math.max(...p.size) < 0.012;
+        mesh.castShadow = p.material !== 'glass' && p.material !== 'water' && !small;
+        mesh.receiveShadow = !small;
+        this.root.add(mesh);
+        this.meshes.push(mesh);
+      }
     });
+    this.root.position.set(0, 0, 0);
+    this.root.updateMatrixWorld(true);
+    this.snapFloating();
+    this.meshes.forEach(m => { m.userData.base = m.position.clone(); });
 
     // ground & centre the model
     this.root.position.set(0, 0, 0);
@@ -266,21 +198,61 @@ export class Viewer {
 
   setBlueprint(on) { this.blueprint = on; this.applyBlueprint(); }
 
+  setOutlines(on) { this.outlines = on; this.applyBlueprint(); }
+
   applyBlueprint() {
+    const want = this.blueprint || this.outlines;
+    const tiny = (this.radius || 1) * 0.004;
     for (const m of this.meshes) {
-      if (this.blueprint && !m.userData.edges) {
-        const eg = new THREE.EdgesGeometry(m.geometry, 25);
-        const l = new THREE.LineSegments(eg, this.edgeMat);
+      if (want && !m.userData.edges && Math.max(...m.userData.part.size) > tiny) {
+        const l = new THREE.LineSegments(m.userData.edgeGeo, this.outlineMat);
         l.raycast = () => {};
         m.add(l);
         m.userData.edges = l;
       }
-      if (m.userData.edges) m.userData.edges.visible = this.blueprint;
-      m.userData.realMat.wireframe = false;
-      m.userData.realMat.transparent = this.blueprint || m.userData.part.material === 'glass' || m.userData.part.material === 'water';
-      m.userData.realMat.opacity = this.blueprint ? 0.18 : (m.userData.part.material === 'glass' ? 0.32 : m.userData.part.material === 'water' ? 0.6 : 1);
-      m.userData.realMat.depthWrite = !this.blueprint;
-      m.userData.realMat.needsUpdate = true;
+      if (m.userData.edges) {
+        m.userData.edges.material = this.blueprint ? this.edgeMat : this.outlineMat;
+        m.userData.edges.visible = want && !m.userData.ghost;
+      }
+    }
+    for (const mat of this.materials || []) {
+      const pm = this.meshes.find(m => m.userData.realMat === mat)?.userData.part.material;
+      mat.transparent = this.blueprint || pm === 'glass' || pm === 'water';
+      mat.opacity = this.blueprint ? 0.18 : (pm === 'glass' ? 0.28 : pm === 'water' ? 0.6 : 1);
+      mat.depthWrite = !this.blueprint && pm !== 'glass';
+      mat.needsUpdate = true;
+    }
+  }
+
+  // close small gaps under parts that touch nothing (AI rounding errors)
+  snapFloating() {
+    const ms = this.meshes.filter(m => m.userData.part.shape !== 'path');
+    if (ms.length < 2) return;
+    const boxes = new Map(ms.map(m => [m, new THREE.Box3().setFromObject(m)]));
+    const all = new THREE.Box3(); boxes.forEach(b => all.union(b));
+    const tol = Math.max(0.003, all.getSize(new THREE.Vector3()).length() * 0.012);
+    const floorY = all.min.y;
+    const sorted = ms.slice().sort((a, b) => boxes.get(a).min.y - boxes.get(b).min.y);
+    for (const m of sorted) {
+      const b = boxes.get(m);
+      if (b.min.y - floorY < 0.0008) continue;
+      const grown = b.clone().expandByScalar(0.0008);
+      let touching = false;
+      for (const [o, ob] of boxes) if (o !== m && grown.intersectsBox(ob)) { touching = true; break; }
+      if (touching) continue;
+      let top = floorY;
+      for (const [o, ob] of boxes) {
+        if (o === m || ob.max.y > b.min.y + 0.0005) continue;
+        const ox = Math.min(b.max.x, ob.max.x) - Math.max(b.min.x, ob.min.x);
+        const oz = Math.min(b.max.z, ob.max.z) - Math.max(b.min.z, ob.min.z);
+        if (ox > 0 && oz > 0) top = Math.max(top, ob.max.y);
+      }
+      const gap = b.min.y - top;
+      if (gap > 0.0008 && gap <= tol) {
+        m.position.y -= gap;
+        m.updateMatrixWorld(true);
+        boxes.set(m, new THREE.Box3().setFromObject(m));
+      }
     }
   }
 
@@ -296,7 +268,7 @@ export class Viewer {
       m.castShadow = built && m.userData.part.material !== 'glass';
       m.userData.ghost = !built;
       m.userData.current = Number.isFinite(n) && st === n;
-      if (m.userData.edges) m.userData.edges.visible = this.blueprint && built;
+      if (m.userData.edges) m.userData.edges.visible = (this.blueprint || this.outlines) && built;
       if (animate && built && st === n && (prev < n || !Number.isFinite(prev))) {
         this.anims.push({ mesh: m, t: 0, dur: 0.55, delay: Math.random() * 0.25 });
         m.userData.anim = 0;
@@ -438,9 +410,10 @@ export class Viewer {
   }
 
   recolor(i, hex) {
-    const m = this.meshes[i];
+    const m = this.meshes.find(x => x.userData.index === i);
     if (!m) return;
     m.userData.realMat.color.set(hex);
+    if (m.userData.part.material === 'led') m.userData.realMat.emissive.set(hex);
     m.userData.part.color = hex;
   }
 

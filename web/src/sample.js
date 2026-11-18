@@ -1,17 +1,23 @@
 // Built-in demo so the app shows something before a key is added.
 const W = '#c9a46a', W2 = '#b98f57', SOIL = '#4a3526', LEAF = '#4f9a3c';
-const parts = [];
-// posts
-for (const x of [-0.54, 0.54]) for (const z of [-0.24, 0.24]) parts.push({ name: 'Corner post', shape: 'box', size: [0.07, 0.4, 0.07], pos: [x, 0.2, z], rot: [0, 0, 0], color: W2, material: 'wood', item: 's2', step: 1 });
-// long boards
-for (const z of [-0.2875, 0.2875]) for (const y of [0.1, 0.3]) parts.push({ name: 'Long side board', shape: 'box', size: [1.2, 0.195, 0.025], pos: [0, y, z], rot: [0, 0, 0], color: W, material: 'wood', item: 's1', step: 2 });
-// short boards
-for (const x of [-0.5875, 0.5875]) for (const y of [0.1, 0.3]) parts.push({ name: 'End board', shape: 'box', size: [0.025, 0.195, 0.55], pos: [x, y, 0], rot: [0, 0, 0], color: W, material: 'wood', item: 's1', step: 3 });
-parts.push({ name: 'Liner', shape: 'box', size: [1.12, 0.005, 0.52], pos: [0, 0.003, 0], rot: [0, 0, 0], color: '#222222', material: 'fabric', item: 's4', step: 4 });
-parts.push({ name: 'Garden soil', shape: 'box', size: [1.12, 0.33, 0.52], pos: [0, 0.17, 0], rot: [0, 0, 0], color: SOIL, material: 'soil', item: 's5', step: 5 });
-[[-0.38, -0.12], [-0.12, 0.12], [0.14, -0.1], [0.38, 0.12]].forEach(([x, z], i) => {
-  parts.push({ name: 'Seedling', shape: 'sphere', size: [0.16, 0.13, 0.16], pos: [x, 0.39, z], rot: [0, 0, 0], color: i % 2 ? LEAF : '#6bb84a', material: 'plant', item: 's6', step: 6 });
-  parts.push({ name: 'Stem', shape: 'cylinder', size: [0.012, 0.05, 0.012], pos: [x, 0.355, z], rot: [0, 0, 0], color: '#3d6b2a', material: 'plant', item: 's6', step: 6 });
+const parts = [
+  // corner posts (4 via mirror)
+  { name: 'Corner post', shape: 'box', size: [0.07, 0.4, 0.07], pos: [0.54, 0.2, 0.24], rot: [0, 0, 0], color: W2, material: 'wood', item: 's2', step: 1, mirror: 'xz' },
+  // long side boards: 2 high, both sides
+  { name: 'Long side board', shape: 'box', size: [1.2, 0.195, 0.025], pos: [0, 0.1, 0.2875], rot: [0, 0, 0], color: W, material: 'wood', item: 's1', step: 2, repeat: { count: 2, offset: [0, 0.2, 0] }, mirror: 'z' },
+  { name: 'Screw head', shape: 'cylinder', size: [0.009, 0.003, 0.009], pos: [0.54, 0.06, 0.3015], rot: [90, 0, 0], color: '#b9c0c8', material: 'metal', item: 's3', step: 2, repeat: { count: 4, offset: [0, 0.08, 0] }, mirror: 'xz' },
+  // end boards
+  { name: 'End board', shape: 'box', size: [0.025, 0.195, 0.55], pos: [0.5875, 0.1, 0], rot: [0, 0, 0], color: '#c49c62', material: 'wood', item: 's1', step: 3, repeat: { count: 2, offset: [0, 0.2, 0] }, mirror: 'x' },
+  { name: 'Screw head', shape: 'cylinder', size: [0.009, 0.003, 0.009], pos: [0.6015, 0.06, 0.24], rot: [0, 0, 90], color: '#b9c0c8', material: 'metal', item: 's3', step: 3, repeat: { count: 4, offset: [0, 0.08, 0] }, mirror: 'xz' },
+  // liner + soil
+  { name: 'Weed mat liner', shape: 'box', size: [1.12, 0.004, 0.52], pos: [0, 0.002, 0], rot: [0, 0, 0], color: '#2a2a2a', material: 'fabric', item: 's4', step: 4 },
+  { name: 'Garden soil', shape: 'box', size: [1.12, 0.355, 0.52], pos: [0, 0.1815, 0], rot: [0, 0, 0], color: SOIL, material: 'soil', item: 's5', step: 5 },
+];
+// seedlings: stem + rosette of leaves arranged in a circle
+[[-0.4, -0.13], [-0.13, 0.12], [0.14, -0.11], [0.41, 0.12]].forEach(([x, z], i) => {
+  parts.push({ name: 'Seedling stem', shape: 'cylinder', size: [0.012, 0.05, 0.012], pos: [x, 0.384, z], rot: [0, 0, 0], color: '#5c8a3a', material: 'plant', item: 's6', step: 6 });
+  parts.push({ name: 'Leaf', shape: 'sphere', size: [0.085, 0.014, 0.04], pos: [x + 0.045, 0.415, z], rot: [0, 0, 25], color: i % 2 ? LEAF : '#6bb84a', material: 'plant', item: 's6', step: 6, repeat: { count: 6, offset: [0, 0, 0], rot: [0, 60, 0], around: [x, 0.415, z] } });
+  parts.push({ name: 'Inner leaves', shape: 'sphere', size: [0.045, 0.05, 0.045], pos: [x, 0.425, z], rot: [0, 0, 0], color: '#8fd16a', material: 'plant', item: 's6', step: 6 });
 });
 
 export const SAMPLE = {
