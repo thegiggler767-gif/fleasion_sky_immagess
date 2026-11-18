@@ -30,28 +30,37 @@ jobs:
         with:
           gradle-version: '8.9'
 
-      # Keeps the same debug signing key between builds so updates install over the old app
+      # Keeps the same signing key between builds so updates install over the old app.
+      # (Add KEYSTORE_B64 / KEYSTORE_PASSWORD / KEY_ALIAS repo secrets to make it permanent.)
       - uses: actions/cache@v4
         with:
-          path: ~/.android/debug.keystore
-          key: buildcart-debug-keystore-v1
+          path: ~/.bc3d-keystore
+          key: buildcart-ci-keystore-v1
 
       - name: Set up signing key
         env:
           KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
         run: |
+          mkdir -p "$HOME/.bc3d-keystore"
           if [ -n "$KEYSTORE_B64" ]; then
             echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
             echo "KEYSTORE_FILE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
           else
-            echo "No KEYSTORE_B64 secret - using the debug key"
+            if [ ! -f "$HOME/.bc3d-keystore/ci.jks" ]; then
+              echo "Creating a new CI signing key"
+              keytool -genkeypair -keystore "$HOME/.bc3d-keystore/ci.jks" -storepass android -keypass android \
+                -alias buildcart -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=BuildCart 3D"
+            else
+              echo "Reusing cached CI signing key"
+            fi
+            echo "KEYSTORE_FILE=$HOME/.bc3d-keystore/ci.jks" >> "$GITHUB_ENV"
           fi
 
       - name: Build
         env:
           VERSION_CODE: ${{ github.run_number }}
-          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD || 'android' }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS || 'buildcart' }}
         run: |
           gradle assembleRelease --no-daemon --stacktrace
           cp app/build/outputs/apk/release/app-release.apk BuildCart3D.apk
