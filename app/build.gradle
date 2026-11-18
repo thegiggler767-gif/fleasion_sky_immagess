@@ -1,0 +1,41 @@
+plugins {
+    id 'com.android.application'
+}
+
+def ksFile = System.getenv("KEYSTORE_FILE")
+
+android {
+    namespace 'com.thegiggler.buildcart3d'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'com.thegiggler.buildcart3d'
+        minSdk 26
+        targetSdk 34
+        versionCode Integer.parseInt(System.getenv("VERSION_CODE") ?: "1")
+        versionName "1.0." + (System.getenv("VERSION_CODE") ?: "1")
+    }
+
+    signingConfigs {
+        release {
+            if (ksFile != null && new File(ksFile).exists()) {
+                storeFile file(ksFile)
+                storePassword System.getenv("KEYSTORE_PASSWORD")
+                keyAlias System.getenv("KEY_ALIAS")
+                keyPassword System.getenv("KEYSTORE_PASSWORD")
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig (ksFile != null && new File(ksFile).exists()) ? signingConfigs.release : signingConfigs.debug
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
