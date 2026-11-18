@@ -1,5 +1,5 @@
 // OpenRouter client + prompt + JSON repair/validation
-import { httpRequest } from './bridge.js';
+import { httpRequest, httpStream } from './bridge.js';
 
 export const FREE_ROUTER = 'openrouter/free';
 const API = 'https://openrouter.ai/api/v1';
@@ -189,36 +189,70 @@ export function normalize(raw, prompt) {
   return out;
 }
 
-async function callOpenRouter(settings, messages, model, signal) {
-  const body = {
-    model,
-    messages,
-    temperature: 0.4,
-    max_tokens: 12000,
+// ---- usage counter (free tier ≈ 50 requests/day) ----
+export function usageToday() {
+  try {
+    const u = JSON.parse(localStorage.getItem('bc3d_usage') || '{}');
+    return u.date === new Date().toDateString() ? u.n : 0;
+  } catch { return 0; }
+}
+function countUsage() {
+  const n = usageToday() + 1;
+  localStorage.setItem('bc3d_usage', JSON.stringify({ date: new Date().toDateString(), n }));
+}
+
+function headers(settings) {
+  return {
+    'Authorization': `Bearer ${settings.apiKey.trim()}`,
+    'Content-Type': 'application/json',
+    'HTTP-Referer': 'https://github.com/thegiggler767-gif/fleasion_sky_immagess',
+    'X-Title': 'BuildCart 3D',
   };
-  const res = await httpRequest({
-    method: 'POST',
-    url: `${API}/chat/completions`,
-    headers: {
-      'Authorization': `Bearer ${settings.apiKey.trim()}`,
-      'Content-Type': 'application/json',
-      'HTTP-Referer': 'https://github.com/thegiggler767-gif/BuildCart3D',
-      'X-Title': 'BuildCart 3D',
+}
+
+// Streams the reply. onText(fullTextSoFar, {thinking}) is called as text arrives.
+async function callOpenRouter(settings, messages, model, signal, onText, opts = {}) {
+  const body = { model, messages, temperature: opts.temperature ?? 0.4, max_tokens: opts.max_tokens ?? 12000, stream: true };
+  countUsage();
+  let buf = '', content = '', reasoning = '', usedModel = model, finish = null, streamErr = null;
+  const res = await httpStream({
+    method: 'POST', url: `${API}/chat/completions`, headers: headers(settings), body: JSON.stringify(body), signal,
+    onChunk: chunk => {
+      buf += chunk;
+      const lines = buf.split('\n');
+      buf = lines.pop();
+      for (const line of lines) {
+        const l = line.trim();
+        if (!l.startsWith('data:')) continue;
+        const data = l.slice(5).trim();
+        if (data === '[DONE]') continue;
+        let j; try { j = JSON.parse(data); } catch { continue; }
+        if (j.error) { streamErr = j.error; continue; }
+        if (j.model) usedModel = j.model;
+        const ch = j.choices && j.choices[0];
+        if (!ch) continue;
+        const d = ch.delta || ch.message || {};
+        if (d.content) content += d.content;
+        if (d.reasoning) reasoning += d.reasoning;
+        if (ch.finish_reason) finish = ch.finish_reason;
+      }
+      onText?.(content, { thinking: !content && !!reasoning, reasoningLen: reasoning.length });
     },
-    body: JSON.stringify(body),
-    signal,
   });
-  let json;
-  try { json = JSON.parse(res.body); } catch (e) { json = null; }
-  if (res.status !== 200 || !json || json.error) {
-    const msg = json?.error?.message || res.body?.slice(0, 200) || `HTTP ${res.status}`;
-    const err = new Error(friendlyError(res.status, msg));
-    err.status = res.status || json?.error?.code;
+  // flush any last line
+  if (buf.trim().startsWith('data:')) {
+    try { const j = JSON.parse(buf.trim().slice(5)); const d = j.choices?.[0]?.delta; if (d?.content) content += d.content; } catch { }
+  }
+  if (res.status !== 200 || streamErr) {
+    let json = null; try { json = JSON.parse(res.body); } catch { }
+    const e = streamErr || json?.error;
+    const status = res.status !== 200 ? res.status : (e?.code || 500);
+    const err = new Error(friendlyError(status, e?.message || res.body?.slice(0, 200) || `HTTP ${res.status}`));
+    err.status = status;
     throw err;
   }
-  const choice = json.choices && json.choices[0];
-  const content = choice?.message?.content || choice?.message?.reasoning || choice?.text || '';
-  return { content, model: json.model || model, finish: choice?.finish_reason };
+  if (!content && reasoning) content = reasoning;
+  return { content, model: usedModel, finish };
 }
 
 function friendlyError(status, msg) {
@@ -230,18 +264,20 @@ function friendlyError(status, msg) {
 }
 
 // Generate a build. onStatus(text) for progress.
-export async function generate(settings, { prompt, mode, details, budget }, onStatus, signal) {
+export async function generate(settings, { prompt, mode, details, budget, image }, onStatus, signal) {
   const userMsg = [
-    `Request: ${prompt}`,
+    prompt ? `Request: ${prompt}` : 'Request: look at the photo and work out what I want (the item to buy, or the project to build or copy).',
+    image ? 'A photo is attached: identify the item/project in it and base everything on it (match its look, size and parts in the 3D model).' : '',
     mode === 'item' ? 'This is an ITEM I want to buy.' : mode === 'project' ? 'This is a PROJECT I want to build.' : 'Decide whether this is an item to buy or a project to build.',
     details ? `Extra details: ${details}` : '',
     budget ? `Budget: about ${budget} ${settings.currency}.` : '',
     'Reply with the JSON object only.',
   ].filter(Boolean).join('\n');
+  const content = image ? [{ type: 'text', text: userMsg }, { type: 'image_url', image_url: { url: image } }] : userMsg;
   return runWithRetries(settings, [
     { role: 'system', content: systemPrompt(settings) },
-    { role: 'user', content: userMsg },
-  ], prompt, onStatus, signal);
+    { role: 'user', content },
+  ], prompt || 'Photo build', onStatus, signal);
 }
 
 export async function tweak(settings, current, instruction, onStatus, signal) {
@@ -252,19 +288,35 @@ export async function tweak(settings, current, instruction, onStatus, signal) {
   ], current.title, onStatus, signal);
 }
 
-async function runWithRetries(settings, messages, prompt, onStatus, signal) {
-  const models = [settings.model || FREE_ROUTER];
-  if (models[0] !== FREE_ROUTER) models.push(FREE_ROUTER);
+export function modelChain(settings) {
+  const chain = [settings.model || FREE_ROUTER, FREE_ROUTER, ...(settings.fallbacks || [])];
+  return [...new Set(chain.filter(Boolean))].slice(0, 4);
+}
+
+export function progressText(t) {
+  const items = (t.match(/"price"\s*:/g) || []).length;
+  const parts = (t.match(/"shape"\s*:/g) || []).length;
+  const steps = (t.match(/"detail"\s*:/g) || []).length;
+  const bits = [];
+  if (items) bits.push(`🛒 ${items} item${items > 1 ? 's' : ''}`);
+  if (steps) bits.push(`📋 ${steps} step${steps > 1 ? 's' : ''}`);
+  if (parts) bits.push(`🧩 ${parts} 3D part${parts > 1 ? 's' : ''}`);
+  return bits.join(' · ') || `✍️ ${t.length} characters`;
+}
+
+async function runWithRetries(settings, messages, prompt, onStatus, signal, parse = normalizeReply) {
+  const models = modelChain(settings);
   let lastErr;
   for (let attempt = 0; attempt < 3; attempt++) {
     const model = models[Math.min(attempt, models.length - 1)];
     try {
-      onStatus?.(attempt === 0 ? 'Asking the AI…' : `Retrying (${attempt + 1}/3)…`);
-      const r = await callOpenRouter(settings, messages, model, signal);
-      onStatus?.('Building your 3D model…');
-      const parsed = stripToJson(r.content);
-      const data = normalize(parsed, prompt);
-      if (!data.shopping_list.length && !data.model.parts.length) throw new Error('The AI reply was empty');
+      onStatus?.(attempt === 0 ? 'Asking the AI…' : `Retrying with another model (${attempt + 1}/3)…`, '');
+      const r = await callOpenRouter(settings, messages, model, signal, (t, info) => {
+        if (info.thinking) onStatus?.('The AI is thinking…', `🧠 ${info.reasoningLen} characters of thinking`);
+        else onStatus?.('Writing your build…', progressText(t));
+      });
+      onStatus?.('Building your 3D model…', progressText(r.content));
+      const data = parse(stripToJson(r.content), prompt);
       data.generatedBy = r.model;
       return data;
     } catch (e) {
@@ -279,6 +331,57 @@ async function runWithRetries(settings, messages, prompt, onStatus, signal) {
   throw lastErr;
 }
 
+function normalizeReply(parsed, prompt) {
+  const data = normalize(parsed, prompt);
+  if (!data.shopping_list.length && !data.model.parts.length) throw new Error('The AI reply was empty');
+  return data;
+}
+
+// Ask the AI to rebuild ONLY the 3D model with more detail.
+export async function refineModel(settings, current, onStatus, signal) {
+  const brief = {
+    type: current.type, title: current.title, dimensions: current.dimensions,
+    shopping_list: current.shopping_list.map(i => ({ id: i.id, name: i.name, qty: i.qty, notes: i.notes })),
+    steps: current.steps.map(s => s.title),
+    model: current.model,
+  };
+  const msg = `Here is a build and its current rough 3D model:\n${JSON.stringify(brief)}\n\nMake a MUCH better, more detailed and more accurate 3D model of the finished ${current.type}: 30 to 90 parts, true proportions, every part touching what it connects to, nothing floating, realistic colours and materials, small details (handles, screws as small cylinders, trims, legs, edges). Keep the "item" ids and "step" numbers matching the shopping list and steps above. Reply with ONLY {"model":{"parts":[...]}}.`;
+  return runWithRetries(settings, [
+    { role: 'system', content: systemPrompt(settings) },
+    { role: 'user', content: msg },
+  ], current.title, onStatus, signal, (parsed) => {
+    const merged = normalize({ ...current, model: parsed.model || parsed }, current.title);
+    if (merged.model.parts.length < 3) throw new Error('The AI reply was empty');
+    return merged;
+  });
+}
+
+// Free-text Q&A about a build (streams). Returns the answer text.
+export async function ask(settings, current, history, question, onText, signal) {
+  const brief = {
+    title: current.title, type: current.type, summary: current.summary, dimensions: current.dimensions,
+    shopping_list: current.shopping_list.map(i => `${i.qty} ${i.unit} ${i.name} (${i.price} ${settings.currency})${i.notes ? ' - ' + i.notes : ''}`),
+    steps: current.steps.map((s, i) => `${i + 1}. ${s.title}: ${s.detail}`), tools: current.tools,
+  };
+  const messages = [
+    { role: 'system', content: `You are BuildCart, a friendly expert maker and shopping helper. The user lives in ${settings.country}, prices in ${settings.currency}, ${settings.units} units. Answer questions about their build clearly and practically in short paragraphs or short lists (plain text, light markdown ok). Here is the build:\n${JSON.stringify(brief)}` },
+    ...history.slice(-10).map(m => ({ role: m.role, content: m.content })),
+    { role: 'user', content: question },
+  ];
+  let lastErr;
+  for (const model of modelChain(settings).slice(0, 3)) {
+    try {
+      const r = await callOpenRouter(settings, messages, model, signal, t => onText?.(t), { temperature: 0.6, max_tokens: 2500 });
+      return r.content.replace(/<think>[\s\S]*?<\/think>/gi, '').trim() || '(no answer)';
+    } catch (e) {
+      if (signal?.aborted) throw new Error('Cancelled');
+      lastErr = e;
+      if (e.status === 401 || e.status === 0) throw e;
+    }
+  }
+  throw lastErr;
+}
+
 export async function listFreeModels(settings) {
   const res = await httpRequest({ method: 'GET', url: `${API}/models`, headers: settings.apiKey ? { Authorization: `Bearer ${settings.apiKey.trim()}` } : {} });
   if (res.status !== 200) throw new Error(friendlyError(res.status, res.body?.slice(0, 120)));
@@ -286,7 +389,7 @@ export async function listFreeModels(settings) {
   return (json.data || [])
     .filter(m => m.pricing && Number(m.pricing.prompt) === 0 && Number(m.pricing.completion) === 0)
     .filter(m => !(m.architecture?.output_modalities || ['text']).every(x => x !== 'text'))
-    .map(m => ({ id: m.id, name: m.name || m.id, ctx: m.context_length || 0 }))
+    .map(m => ({ id: m.id, name: m.name || m.id, ctx: m.context_length || 0, vision: (m.architecture?.input_modalities || []).includes('image') }))
     .sort((a, b) => b.ctx - a.ctx);
 }
 

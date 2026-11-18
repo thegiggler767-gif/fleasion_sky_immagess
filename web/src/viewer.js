@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
+import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 
 const UNIT = {};
 function unitGeo(shape) {
@@ -79,9 +80,15 @@ function makeMaterial(p) {
 }
 
 export class Viewer {
-  constructor(container, { onSelect } = {}) {
+  constructor(container, { onSelect, onMeasure } = {}) {
     this.container = container;
     this.onSelect = onSelect;
+    this.onMeasure = onMeasure;
+    this.measuring = false;
+    this.measurePts = [];
+    this.isolated = -1;
+    this.camAnim = null;
+    this.follow = true;
     this.meshes = [];
     this.anims = [];
     this.explode = 0;
@@ -108,7 +115,13 @@ export class Viewer {
     this.controls.autoRotateSpeed = 1.2;
     this.controls.maxPolarAngle = Math.PI * 0.495;
 
-    this.scene.add(new THREE.HemisphereLight(0xdfe9ff, 0x3a3226, 1.1));
+    try {
+      const pmrem = new THREE.PMREMGenerator(r);
+      this.scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+      this.scene.environmentIntensity = 0.55;
+      pmrem.dispose();
+    } catch (e) { /* older GPUs: fall back to plain lights */ }
+    this.scene.add(new THREE.HemisphereLight(0xdfe9ff, 0x3a3226, 0.75));
     const sun = this.sun = new THREE.DirectionalLight(0xffffff, 2.2);
     sun.castShadow = true;
     sun.shadow.mapSize.set(2048, 2048);
@@ -131,13 +144,19 @@ export class Viewer {
 
     this.ray = new THREE.Raycaster();
     let down = null;
-    r.domElement.addEventListener('pointerdown', e => { down = { x: e.clientX, y: e.clientY, t: performance.now() }; this.userTouched = true; });
+    r.domElement.addEventListener('pointerdown', e => { down = { x: e.clientX, y: e.clientY, t: performance.now() }; this.userTouched = true; this.camAnim = null; });
     r.domElement.addEventListener('pointerup', e => {
       if (!down) return;
       const moved = Math.hypot(e.clientX - down.x, e.clientY - down.y);
       if (moved < 8 && performance.now() - down.t < 400) this.pick(e);
       down = null;
     });
+
+    this.mLabel = document.createElement('div');
+    this.mLabel.className = 'measure-label hidden';
+    container.appendChild(this.mLabel);
+    this.measureGroup = new THREE.Group();
+    this.scene.add(this.measureGroup);
 
     this.resizeObs = new ResizeObserver(() => this.resize());
     this.resizeObs.observe(container);
@@ -164,6 +183,8 @@ export class Viewer {
     this.meshes = [];
     this.anims = [];
     this.selected = -1;
+    this.isolated = -1;
+    this.clearMeasure();
     if (this.grid) { this.scene.remove(this.grid); this.grid.geometry.dispose(); }
 
     model.parts.forEach((p, i) => {
@@ -270,7 +291,7 @@ export class Viewer {
     for (const m of this.meshes) {
       const st = m.userData.step;
       const built = st <= n;
-      m.visible = built || this.ghosts;
+      m.visible = (built || this.ghosts) && (this.isolated < 0 || m.userData.index === this.isolated);
       m.material = built ? m.userData.realMat : this.ghostMat;
       m.castShadow = built && m.userData.part.material !== 'glass';
       m.userData.ghost = !built;
@@ -307,6 +328,11 @@ export class Viewer {
     const v = new THREE.Vector2(((e.clientX - rect.left) / rect.width) * 2 - 1, -((e.clientY - rect.top) / rect.height) * 2 + 1);
     this.ray.setFromCamera(v, this.camera);
     const hits = this.ray.intersectObjects(this.meshes.filter(m => m.visible && !m.userData.ghost), false);
+    if (this.measuring) {
+      if (!hits.length) return;
+      this.addMeasurePoint(hits[0].point.clone());
+      return;
+    }
     const i = hits.length ? hits[0].object.userData.index : -1;
     this.select(i);
     this.onSelect?.(i);
@@ -345,8 +371,17 @@ export class Viewer {
       const pulse = 0.18 + 0.14 * Math.sin(performance.now() / 260);
       for (const m of this.meshes) if (m.userData.current && m.userData.index !== this.selected && m.userData.realMat.emissive) m.userData.realMat.emissiveIntensity = pulse;
     }
+    if (this.camAnim) {
+      const a = this.camAnim;
+      a.t = Math.min(a.t + dt / a.dur, 1);
+      const e = a.t < 0.5 ? 4 * a.t * a.t * a.t : 1 - Math.pow(-2 * a.t + 2, 3) / 2;
+      this.camera.position.lerpVectors(a.p0, a.p1, e);
+      this.controls.target.lerpVectors(a.t0, a.t1, e);
+      if (a.t >= 1) this.camAnim = null;
+    }
     this.controls.update();
     this.renderer.render(this.scene, this.camera);
+    if (this.measurePts.length === 2) this.placeMeasureLabel();
     requestAnimationFrame(this.loop);
   }
 
@@ -359,6 +394,113 @@ export class Viewer {
     }
     const f = v => v < 1 ? `${Math.round(v * 1000)} mm` : `${v.toFixed(2)} m`;
     return `W ${f(s.x)} × H ${f(s.y)} × D ${f(s.z)}`;
+  }
+
+  // ---- camera helpers ----
+  flyTo(target, position, dur = 0.7) {
+    this.camAnim = { t: 0, dur, p0: this.camera.position.clone(), p1: position.clone(), t0: this.controls.target.clone(), t1: target.clone() };
+  }
+
+  setView(name) {
+    const r = this.radius || 1;
+    const dist = r / Math.sin(THREE.MathUtils.degToRad(this.camera.fov / 2)) * (this.camera.aspect < 1 ? 1.2 : 1.0);
+    const target = new THREE.Vector3(0, this.size ? this.size.y / 2 : 0.5, 0);
+    const dirs = { front: [0, 0.08, 1], back: [0, 0.08, -1], left: [-1, 0.08, 0], right: [1, 0.08, 0], top: [0.001, 1, 0.02], iso: [1, 0.75, 1.3] };
+    const d = new THREE.Vector3(...(dirs[name] || dirs.iso)).normalize();
+    this.setAutoRotate(false);
+    this.flyTo(target, target.clone().addScaledVector(d, dist));
+  }
+
+  // frame a set of part indices
+  focusParts(indices) {
+    const ms = this.meshes.filter(m => indices.includes(m.userData.index));
+    if (!ms.length) return;
+    this.root.updateMatrixWorld(true);
+    const box = new THREE.Box3();
+    ms.forEach(m => box.expandByObject(m));
+    const c = box.getCenter(new THREE.Vector3());
+    const rad = Math.max(box.getSize(new THREE.Vector3()).length() / 2, (this.radius || 1) * 0.25);
+    const dist = rad / Math.sin(THREE.MathUtils.degToRad(this.camera.fov / 2)) * 1.15;
+    const dir = this.camera.position.clone().sub(this.controls.target).normalize();
+    if (dir.y < 0.25) { dir.y = 0.35; dir.normalize(); }
+    this.flyTo(c, c.clone().addScaledVector(dir, Math.min(dist, (this.radius || 1) * 4)));
+  }
+
+  focusStep(n) {
+    if (!this.follow || !Number.isFinite(n)) return;
+    this.focusParts(this.meshes.filter(m => m.userData.step === n).map(m => m.userData.index));
+  }
+
+  isolate(i) {
+    this.isolated = i;
+    this.setStep(this.step, false);
+    if (i >= 0) this.focusParts([i]); else this.setView('iso');
+  }
+
+  recolor(i, hex) {
+    const m = this.meshes[i];
+    if (!m) return;
+    m.userData.realMat.color.set(hex);
+    m.userData.part.color = hex;
+  }
+
+  // ---- measure tool ----
+  setMeasuring(on) {
+    this.measuring = on;
+    this.clearMeasure();
+    if (on) { this.select(-1); this.setAutoRotate(false); }
+  }
+
+  clearMeasure() {
+    this.measurePts = [];
+    if (this.measureGroup) {
+      this.measureGroup.children.forEach(c => c.geometry?.dispose());
+      this.measureGroup.clear();
+    }
+    this.mLabel?.classList.add('hidden');
+  }
+
+  addMeasurePoint(p) {
+    if (this.measurePts.length >= 2) this.clearMeasure();
+    this.measurePts.push(p);
+    const r = (this.radius || 1) * 0.018;
+    const dot = new THREE.Mesh(new THREE.SphereGeometry(r, 16, 12), new THREE.MeshBasicMaterial({ color: 0xffd23f, depthTest: false }));
+    dot.renderOrder = 10;
+    dot.position.copy(p);
+    this.measureGroup.add(dot);
+    if (this.measurePts.length === 2) {
+      const g = new THREE.BufferGeometry().setFromPoints(this.measurePts);
+      const line = new THREE.Line(g, new THREE.LineBasicMaterial({ color: 0xffd23f, depthTest: false }));
+      line.renderOrder = 10;
+      this.measureGroup.add(line);
+      const d = this.measurePts[0].distanceTo(this.measurePts[1]);
+      this.measureDist = d;
+      this.onMeasure?.(d);
+    } else this.onMeasure?.(null);
+  }
+
+  placeMeasureLabel() {
+    const mid = this.measurePts[0].clone().add(this.measurePts[1]).multiplyScalar(0.5).project(this.camera);
+    const w = this.container.clientWidth, h = this.container.clientHeight;
+    this.mLabel.style.left = `${(mid.x + 1) / 2 * w}px`;
+    this.mLabel.style.top = `${(1 - mid.y) / 2 * h}px`;
+    this.mLabel.classList.remove('hidden');
+    this.mLabel.textContent = this.formatLen ? this.formatLen(this.measureDist) : `${Math.round(this.measureDist * 1000)} mm`;
+  }
+
+  async exportSTL() {
+    const { STLExporter } = await import('three/examples/jsm/exporters/STLExporter.js');
+    const group = new THREE.Group();
+    for (const m of this.meshes) {
+      const mm = new THREE.Mesh(m.geometry);
+      mm.position.copy(m.userData.base); mm.rotation.copy(m.rotation); mm.scale.copy(m.scale);
+      group.add(mm);
+    }
+    group.position.copy(this.root.position);
+    group.scale.setScalar(1000); // millimetres for slicers
+    group.rotation.x = Math.PI / 2; // Z-up for 3D printing
+    group.updateMatrixWorld(true);
+    return new STLExporter().parse(group, { binary: true });
   }
 
   snapshot() {
